@@ -5,11 +5,13 @@ ARG REVISION
 ENV CGO_ENABLED=0
 WORKDIR /app
 COPY . .
+RUN update-ca-certificates --verbose
 RUN go build -trimpath -ldflags="-w -s -X main.revision=$REVISION" -o smtp2graph .
 
 FROM registry.access.redhat.com/ubi9/ubi-micro
 ARG REVISION
 WORKDIR /app
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /app/smtp2graph /app/smtp2graph
 COPY --from=builder /app/README.md /app/README.md
 COPY --from=builder /app/LICENSE /app/LICENSE
