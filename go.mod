@@ -1,6 +1,6 @@
 module github.com/oamn/smtp2graph
 
-go 1.24.3
+go 1.25.2
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.19.1

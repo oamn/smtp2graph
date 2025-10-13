@@ -97,7 +97,7 @@ swaks --to user@example.com --from sender@example.com --server localhost:1025 --
 
 To develop or test smtp2graph locally, you will need:
 
-- **Go 1.24 or newer**
+- **Go 1.25 or newer**
 - **A Microsoft Entra (Azure AD) application** with Mail.Send permissions (see above for setup)
 
 Clone this repository and set the required environment variables. You can then build and run the application directly:
