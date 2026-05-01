@@ -4,6 +4,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -42,21 +43,43 @@ type Config struct {
 }
 
 // LoadConfig loads configuration from environment variables, applying defaults for SMTP settings.
-// Returns an error if required Entra variables are missing.
+// Returns an error if required variables are missing or optional values are invalid.
 func LoadConfig() (*Config, error) {
+	return LoadConfigFrom(os.Getenv)
+}
+
+// LoadConfigFrom loads configuration using lookup and is intended for tests.
+func LoadConfigFrom(lookup func(string) string) (*Config, error) {
+	maxMessageBytes, err := getenvInt64(lookup, "SMTP_MAX_MESSAGE_BYTES", 10*1024*1024)
+	if err != nil {
+		return nil, err
+	}
+	maxRecipients, err := getenvInt(lookup, "SMTP_MAX_RECIPIENTS", 50)
+	if err != nil {
+		return nil, err
+	}
+	writeTimeout, err := getenvDuration(lookup, "SMTP_WRITE_TIMEOUT", 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	readTimeout, err := getenvDuration(lookup, "SMTP_READ_TIMEOUT", 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
-		SMTPAddr:          getenv("SMTP_SERVER_ADDR", ":1025"),
-		SMTPDomain:        getenv("SMTP_SERVER_DOMAIN", "localhost"),
-		MaxMessageBytes:   getenvInt64("SMTP_MAX_MESSAGE_BYTES", 10*1024*1024),
-		MaxRecipients:     getenvInt("SMTP_MAX_RECIPIENTS", 50),
-		WriteTimeout:      getenvDuration("SMTP_WRITE_TIMEOUT", 10*time.Second),
-		ReadTimeout:       getenvDuration("SMTP_READ_TIMEOUT", 10*time.Second),
-		SenderEmail:       os.Getenv("SENDER_EMAIL"),
-		SenderPassword:    os.Getenv("SENDER_PASSWORD"),
-		EntraClientID:     os.Getenv("ENTRA_CLIENT_ID"),
-		EntraTenantID:     os.Getenv("ENTRA_TENANT_ID"),
-		EntraClientSecret: os.Getenv("ENTRA_CLIENT_SECRET"),
-		SentryDSN:         os.Getenv("SENTRY_DSN"),
+		SMTPAddr:          getenv(lookup, "SMTP_SERVER_ADDR", ":1025"),
+		SMTPDomain:        getenv(lookup, "SMTP_SERVER_DOMAIN", "localhost"),
+		MaxMessageBytes:   maxMessageBytes,
+		MaxRecipients:     maxRecipients,
+		WriteTimeout:      writeTimeout,
+		ReadTimeout:       readTimeout,
+		SenderEmail:       lookup("SENDER_EMAIL"),
+		SenderPassword:    lookup("SENDER_PASSWORD"),
+		EntraClientID:     lookup("ENTRA_CLIENT_ID"),
+		EntraTenantID:     lookup("ENTRA_TENANT_ID"),
+		EntraClientSecret: lookup("ENTRA_CLIENT_SECRET"),
+		SentryDSN:         lookup("SENTRY_DSN"),
 	}
 
 	// Map of required config field names to their values
@@ -74,54 +97,55 @@ func LoadConfig() (*Config, error) {
 		}
 	}
 	if len(missing) > 0 {
+		sort.Strings(missing)
 		return nil, fmt.Errorf("missing required environment variable(s): %s", strings.Join(missing, ", "))
 	}
 	return cfg, nil
 }
 
 // getenv returns the value of the environment variable or the provided default if unset.
-func getenv(key, def string) string {
-	if val := os.Getenv(key); val != "" {
+func getenv(lookup func(string) string, key, def string) string {
+	if val := lookup(key); val != "" {
 		return val
 	}
 	return def
 }
 
-// getenvInt returns the int value of the environment variable or the provided default if unset or invalid.
-func getenvInt(key string, def int) int {
-	val := os.Getenv(key)
+// getenvInt returns the int value of the environment variable or the provided default if unset.
+func getenvInt(lookup func(string) string, key string, def int) (int, error) {
+	val := lookup(key)
 	if val == "" {
-		return def
+		return def, nil
 	}
 	u, err := strconv.ParseUint(val, 10, 0)
 	if err != nil || u == 0 {
-		return def
+		return 0, fmt.Errorf("%s must be a positive integer", key)
 	}
-	return int(u)
+	return int(u), nil
 }
 
-// getenvInt64 returns the int64 value of the environment variable or the provided default if unset or invalid.
-func getenvInt64(key string, def int64) int64 {
-	val := os.Getenv(key)
+// getenvInt64 returns the int64 value of the environment variable or the provided default if unset.
+func getenvInt64(lookup func(string) string, key string, def int64) (int64, error) {
+	val := lookup(key)
 	if val == "" {
-		return def
+		return def, nil
 	}
 	u, err := strconv.ParseUint(val, 10, 64)
 	if err != nil || u == 0 {
-		return def
+		return 0, fmt.Errorf("%s must be a positive integer", key)
 	}
-	return int64(u)
+	return int64(u), nil
 }
 
-// getenvDuration returns the time.Duration value of the environment variable or the provided default if unset or invalid.
-func getenvDuration(key string, def time.Duration) time.Duration {
-	val := os.Getenv(key)
+// getenvDuration returns the time.Duration value of the environment variable or the provided default if unset.
+func getenvDuration(lookup func(string) string, key string, def time.Duration) (time.Duration, error) {
+	val := lookup(key)
 	if val == "" {
-		return def
+		return def, nil
 	}
 	d, err := time.ParseDuration(val)
 	if err != nil || d <= 0 {
-		return def
+		return 0, fmt.Errorf("%s must be a positive duration", key)
 	}
-	return d
+	return d, nil
 }
