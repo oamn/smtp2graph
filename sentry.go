@@ -9,9 +9,9 @@ import (
 	"github.com/getsentry/sentry-go"
 )
 
-// InitSentry initializes Sentry if a DSN is configured.
+// initSentry initializes Sentry if a DSN is configured.
 // Returns a cleanup function to flush events, or a no-op if Sentry is not enabled.
-func InitSentry(cfg *Config) func(context.Context) {
+func initSentry(cfg *appConfig) func(context.Context) {
 	if cfg.SentryDSN == "" {
 		return func(context.Context) {}
 	}
@@ -27,8 +27,8 @@ func InitSentry(cfg *Config) func(context.Context) {
 	}
 }
 
-// ReportError sends an error to Sentry if initialized.
-func ReportError(ctx context.Context, err error) {
+// reportError sends an error to Sentry if initialized.
+func reportError(ctx context.Context, err error) {
 	if err == nil {
 		return
 	}

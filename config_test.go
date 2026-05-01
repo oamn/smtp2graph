@@ -7,7 +7,7 @@ import (
 )
 
 func TestLoadConfigFromDefaults(t *testing.T) {
-	cfg, err := LoadConfigFrom(configLookup(map[string]string{
+	cfg, err := loadConfigFrom(configLookup(map[string]string{
 		"SENDER_EMAIL":        "sender@example.com",
 		"SENDER_PASSWORD":     "password",
 		"ENTRA_CLIENT_ID":     "client-id",
@@ -15,7 +15,7 @@ func TestLoadConfigFromDefaults(t *testing.T) {
 		"ENTRA_CLIENT_SECRET": "client-secret",
 	}))
 	if err != nil {
-		t.Fatalf("LoadConfigFrom() error: %v", err)
+		t.Fatalf("loadConfigFrom() error: %v", err)
 	}
 
 	if cfg.SMTPAddr != ":1025" {
@@ -39,7 +39,7 @@ func TestLoadConfigFromDefaults(t *testing.T) {
 }
 
 func TestLoadConfigFromOverrides(t *testing.T) {
-	cfg, err := LoadConfigFrom(configLookup(map[string]string{
+	cfg, err := loadConfigFrom(configLookup(map[string]string{
 		"SENDER_EMAIL":           "sender@example.com",
 		"SENDER_PASSWORD":        "password",
 		"ENTRA_CLIENT_ID":        "client-id",
@@ -54,7 +54,7 @@ func TestLoadConfigFromOverrides(t *testing.T) {
 		"SENTRY_DSN":             "https://example.invalid/1",
 	}))
 	if err != nil {
-		t.Fatalf("LoadConfigFrom() error: %v", err)
+		t.Fatalf("loadConfigFrom() error: %v", err)
 	}
 
 	if cfg.SMTPAddr != "127.0.0.1:2525" {
@@ -81,9 +81,9 @@ func TestLoadConfigFromOverrides(t *testing.T) {
 }
 
 func TestLoadConfigFromMissingRequired(t *testing.T) {
-	_, err := LoadConfigFrom(configLookup(nil))
+	_, err := loadConfigFrom(configLookup(nil))
 	if err == nil {
-		t.Fatal("LoadConfigFrom() error = nil, want missing required error")
+		t.Fatal("loadConfigFrom() error = nil, want missing required error")
 	}
 
 	for _, name := range []string{
@@ -137,12 +137,12 @@ func TestLoadConfigFromInvalidOptionalValues(t *testing.T) {
 			values := requiredConfig()
 			values[tt.key] = tt.value
 
-			_, err := LoadConfigFrom(configLookup(values))
+			_, err := loadConfigFrom(configLookup(values))
 			if err == nil {
-				t.Fatal("LoadConfigFrom() error = nil, want invalid config error")
+				t.Fatal("loadConfigFrom() error = nil, want invalid config error")
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("LoadConfigFrom() error = %q, want %q", err, tt.wantErr)
+				t.Fatalf("loadConfigFrom() error = %q, want %q", err, tt.wantErr)
 			}
 		})
 	}

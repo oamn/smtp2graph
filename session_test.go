@@ -8,32 +8,27 @@ import (
 	"testing"
 )
 
-// mockHandler implements Handler for testing.
+// mockHandler implements messageHandler for testing.
 type mockHandler struct {
 	called bool
 	msg    *mail.Message
 	err    error
 }
 
-func (m *mockHandler) message(ctx context.Context, msg *mail.Message) error {
+func (m *mockHandler) handleMessage(ctx context.Context, msg *mail.Message) error {
 	m.called = true
 	m.msg = msg
 	return m.err
 }
 
-func newTestSession() *Session {
-	t := &testing.T{} // for t.Helper()
-	return newTestSessionWithT(t)
-}
-
-func newTestSessionWithT(t *testing.T) *Session {
+func newTestSessionWithT(t *testing.T) *smtpSession {
 	t.Helper()
-	cfg := &Config{
+	cfg := &appConfig{
 		SenderEmail:    "sender@example.com",
 		SenderPassword: "password",
 	}
 	h := &mockHandler{}
-	return &Session{
+	return &smtpSession{
 		config:  cfg,
 		ctx:     context.Background(),
 		handler: h,
@@ -83,7 +78,7 @@ func TestSession_SMTP_Like_Success(t *testing.T) {
 	// Check handler was called and message content
 	mh, ok := session.handler.(*mockHandler)
 	if !ok || !mh.called {
-		t.Error("handler.message was not called")
+		t.Error("handler.handleMessage was not called")
 	}
 	if mh.msg == nil {
 		t.Error("handler.message did not receive a message")
@@ -202,7 +197,7 @@ func TestSession_Errors(t *testing.T) {
 	})
 
 	t.Run("Data with invalid MIME", func(t *testing.T) {
-		session := newTestSession()
+		session := newTestSessionWithT(t)
 		session.auth = true
 		_ = session.Mail("sender@example.com", nil)
 		_ = session.Rcpt("recipient@example.com", nil)
@@ -212,4 +207,92 @@ func TestSession_Errors(t *testing.T) {
 			t.Error("expected error for invalid MIME, got empty error")
 		}
 	})
+}
+
+func TestParseMessageNormalizesEnvelopeHeaders(t *testing.T) {
+	sender := mustAddress(t, "Sender <sender@example.com>")
+	recipients := []mail.Address{
+		*mustAddress(t, "to@example.com"),
+		*mustAddress(t, "cc@example.com"),
+		*mustAddress(t, "hidden@example.com"),
+		*mustAddress(t, "Missing <missing@example.com>"),
+	}
+	raw := []byte("From: other@example.com\r\nTo: to@example.com\r\nCc: cc@example.com\r\nBcc: hidden@example.com\r\nSubject: Test\r\n\r\nHello\r\n")
+
+	msg, err := parseMessage(raw, sender, recipients)
+	if err != nil {
+		t.Fatalf("parseMessage() error: %v", err)
+	}
+
+	from := addressList(t, msg, "From")
+	if len(from) != 1 || from[0].Address != "sender@example.com" {
+		t.Fatalf("From = %v, want sender@example.com", from)
+	}
+
+	bcc := addressList(t, msg, "Bcc")
+	if len(bcc) != 2 {
+		t.Fatalf("Bcc = %v, want hidden and missing recipients", bcc)
+	}
+	if bcc[0].Address != "hidden@example.com" || bcc[1].Address != "missing@example.com" {
+		t.Fatalf("Bcc = %v, want hidden@example.com and missing@example.com", bcc)
+	}
+}
+
+func TestParseMessageAddsMissingBccHeader(t *testing.T) {
+	sender := mustAddress(t, "sender@example.com")
+	recipients := []mail.Address{
+		*mustAddress(t, "to@example.com"),
+		*mustAddress(t, "missing@example.com"),
+	}
+	raw := []byte("From: sender@example.com\r\nTo: to@example.com\r\nSubject: Test\r\n\r\nHello\r\n")
+
+	msg, err := parseMessage(raw, sender, recipients)
+	if err != nil {
+		t.Fatalf("parseMessage() error: %v", err)
+	}
+
+	bcc := addressList(t, msg, "Bcc")
+	if len(bcc) != 1 || bcc[0].Address != "missing@example.com" {
+		t.Fatalf("Bcc = %v, want missing@example.com", bcc)
+	}
+}
+
+func TestParseMessageWrapsPlainText(t *testing.T) {
+	sender := mustAddress(t, "sender@example.com")
+	recipients := []mail.Address{*mustAddress(t, "recipient@example.com")}
+
+	msg, err := parseMessage([]byte("plain body"), sender, recipients)
+	if err != nil {
+		t.Fatalf("parseMessage() error: %v", err)
+	}
+
+	if got := msg.Header.Get("Subject"); got != "(no subject)" {
+		t.Fatalf("Subject = %q, want (no subject)", got)
+	}
+
+	body, err := io.ReadAll(msg.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	if string(body) != "plain body" {
+		t.Fatalf("body = %q, want plain body", body)
+	}
+}
+
+func mustAddress(t *testing.T, value string) *mail.Address {
+	t.Helper()
+	addr, err := mail.ParseAddress(value)
+	if err != nil {
+		t.Fatalf("ParseAddress(%q) error: %v", value, err)
+	}
+	return addr
+}
+
+func addressList(t *testing.T, msg *mail.Message, field string) []*mail.Address {
+	t.Helper()
+	addrs, err := msg.Header.AddressList(field)
+	if err != nil {
+		t.Fatalf("AddressList(%q) error: %v", field, err)
+	}
+	return addrs
 }

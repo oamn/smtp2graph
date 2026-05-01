@@ -16,10 +16,9 @@ import (
 	azidentity "github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 )
 
-// GraphMailHandler implements the Handler interface and relays messages to Microsoft Graph API.
-type GraphMailHandler struct {
-	config *Config
-	ctx    context.Context
+// graphMailHandler implements the messageHandler interface and relays messages to Microsoft Graph API.
+type graphMailHandler struct {
+	config *appConfig
 	cred   *azidentity.ClientSecretCredential
 
 	token      string
@@ -27,8 +26,8 @@ type GraphMailHandler struct {
 	tokenMutex sync.Mutex
 }
 
-// NewGraphMailHandler creates a new GraphMailHandler with a single ClientSecretCredential instance.
-func NewGraphMailHandler(ctx context.Context, config *Config) (*GraphMailHandler, error) {
+// newGraphMailHandler creates a new graphMailHandler with a single ClientSecretCredential instance.
+func newGraphMailHandler(config *appConfig) (*graphMailHandler, error) {
 	cred, err := azidentity.NewClientSecretCredential(
 		config.EntraTenantID,
 		config.EntraClientID,
@@ -39,22 +38,20 @@ func NewGraphMailHandler(ctx context.Context, config *Config) (*GraphMailHandler
 		return nil, err
 	}
 
-	return &GraphMailHandler{
+	return &graphMailHandler{
 		config: config,
-		ctx:    ctx,
 		cred:   cred,
 	}, nil
 }
 
-// message relays the given MIME message to Microsoft Graph API.
-// It parses headers and calls sendMailViaGraph (stub).
-func (h *GraphMailHandler) message(ctx context.Context, msg *mail.Message) error {
+// handleMessage relays the given MIME message to Microsoft Graph API.
+func (h *graphMailHandler) handleMessage(ctx context.Context, msg *mail.Message) error {
 	mimeMessage, err := encodeMailMessage(msg)
 	if err != nil {
 		return fmt.Errorf("encodeMailMessage: %w", err)
 	}
 
-	accessToken, err := h.getCachedToken()
+	accessToken, err := h.getCachedToken(ctx)
 	if err != nil {
 		return fmt.Errorf("getCachedToken: %w", err)
 	}
@@ -67,14 +64,14 @@ func (h *GraphMailHandler) message(ctx context.Context, msg *mail.Message) error
 }
 
 // getCachedToken returns a valid access token, refreshing it if needed.
-func (h *GraphMailHandler) getCachedToken() (string, error) {
+func (h *graphMailHandler) getCachedToken(ctx context.Context) (string, error) {
 	h.tokenMutex.Lock()
 	defer h.tokenMutex.Unlock()
 
 	now := time.Now().Unix()
 	// Refresh if token is missing or expires in <60s
 	if h.token == "" || now > h.tokenExp-60 {
-		token, err := h.cred.GetToken(h.ctx, policy.TokenRequestOptions{
+		token, err := h.cred.GetToken(ctx, policy.TokenRequestOptions{
 			Scopes: []string{"https://graph.microsoft.com/.default"},
 		})
 		if err != nil {

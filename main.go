@@ -28,13 +28,13 @@ func main() {
 		os.Exit(0)
 	}
 
-	cfg, err := LoadConfig()
+	cfg, err := loadConfig()
 	if err != nil {
 		exitWithError(err)
 	}
 
 	// Initialize Sentry error reporting if DSN is configured.
-	cleanupSentry := InitSentry(cfg)
+	cleanupSentry := initSentry(cfg)
 
 	// Create a root context that is canceled on shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -60,13 +60,13 @@ func main() {
 	doneCh := make(chan struct{})
 	signal.Notify(shutdownCh, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 
-	// Set up the SMTP backend, passing the context to the handler
-	handler, err := NewGraphMailHandler(ctx, cfg)
+	// Set up the SMTP backend.
+	handler, err := newGraphMailHandler(cfg)
 	if err != nil {
 		exitWithError(err)
 	}
 
-	be := &Backend{
+	be := &smtpBackend{
 		config:  cfg,
 		ctx:     ctx,
 		handler: handler,
@@ -105,18 +105,18 @@ func main() {
 	<-doneCh
 }
 
-// Backend implements the SMTP server methods required by go-smtp.
-// Backend holds the handler used for processing messages.
-type Backend struct {
-	config  *Config
+// smtpBackend implements the SMTP server methods required by go-smtp.
+// smtpBackend holds the handler used for processing messages.
+type smtpBackend struct {
+	config  *appConfig
 	ctx     context.Context
-	handler Handler
+	handler messageHandler
 }
 
 // NewSession is called after the client greeting (EHLO, HELO) and creates a new SMTP session.
-func (bkd *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
+func (bkd *smtpBackend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	ctx := bkd.ctx // Use the backend's context directly
-	return &Session{
+	return &smtpSession{
 		config:     bkd.config,
 		ctx:        ctx,
 		handler:    bkd.handler,
@@ -131,7 +131,7 @@ func exitWithError(err error) {
 	if err == nil {
 		return
 	}
-	ReportError(context.Background(), err)
+	reportError(context.Background(), err)
 	log.Printf("fatal: %v", err)
 	os.Exit(1)
 }

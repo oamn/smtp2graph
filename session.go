@@ -14,16 +14,16 @@ import (
 	"github.com/emersion/go-smtp"
 )
 
-// Handler defines the interface for processing SMTP messages.
-type Handler interface {
-	message(ctx context.Context, msg *mail.Message) error
+// messageHandler defines the interface for processing SMTP messages.
+type messageHandler interface {
+	handleMessage(ctx context.Context, msg *mail.Message) error
 }
 
-// Session manages SMTP session state and implements SMTP command handlers.
-type Session struct {
-	config  *Config
+// smtpSession manages SMTP session state and implements SMTP command handlers.
+type smtpSession struct {
+	config  *appConfig
 	ctx     context.Context
-	handler Handler
+	handler messageHandler
 
 	auth       bool
 	sender     *mail.Address
@@ -31,11 +31,11 @@ type Session struct {
 }
 
 // AuthMechanisms returns the supported authentication mechanisms. Only PLAIN is supported.
-func (s *Session) AuthMechanisms() []string {
+func (s *smtpSession) AuthMechanisms() []string {
 	return []string{sasl.Plain}
 }
 
-func (s *Session) Auth(mech string) (sasl.Server, error) {
+func (s *smtpSession) Auth(mech string) (sasl.Server, error) {
 	return sasl.NewPlainServer(func(identity, username, password string) error {
 		usernameMatch := subtle.ConstantTimeCompare([]byte(username), []byte(s.config.SenderEmail)) == 1
 		passwordMatch := subtle.ConstantTimeCompare([]byte(password), []byte(s.config.SenderPassword)) == 1
@@ -48,7 +48,7 @@ func (s *Session) Auth(mech string) (sasl.Server, error) {
 	}), nil
 }
 
-func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
+func (s *smtpSession) Mail(from string, opts *smtp.MailOptions) error {
 	if !s.auth {
 		err := newSMTPError(s.ctx, 530, smtp.EnhancedCode{5, 7, 0}, "authentication required")
 		return err
@@ -74,7 +74,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	return nil
 }
 
-func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
+func (s *smtpSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 	if !s.auth {
 		err := newSMTPError(s.ctx, 530, smtp.EnhancedCode{5, 7, 0}, "authentication required")
 		return err
@@ -97,7 +97,7 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	return nil
 }
 
-func (s *Session) Data(r io.Reader) error {
+func (s *smtpSession) Data(r io.Reader) error {
 	if !s.auth {
 		err := newSMTPError(s.ctx, 530, smtp.EnhancedCode{5, 7, 0}, "authentication required")
 		return err
@@ -113,83 +113,17 @@ func (s *Session) Data(r io.Reader) error {
 
 	b, err := io.ReadAll(r)
 	if err != nil {
-		ReportError(s.ctx, err)
+		reportError(s.ctx, err)
 		return err
 	}
-	// Parse the message as a MIME message.
-	msg, err := mail.ReadMessage(bytes.NewReader(b))
+
+	msg, err := parseMessage(b, s.sender, s.recipients)
 	if err != nil {
-		// Fallback: treat as plain text, wrap in minimal MIME message.
-		from := s.sender.String()
-		toList := make([]string, len(s.recipients))
-		for i, rcpt := range s.recipients {
-			toList[i] = rcpt.String()
-		}
-		to := strings.Join(toList, ", ")
-		// Compose minimal MIME message
-		var buf bytes.Buffer
-		buf.WriteString("From: " + from + "\r\n")
-		buf.WriteString("To: " + to + "\r\n")
-		buf.WriteString("Subject: (no subject)\r\n")
-		buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
-		buf.WriteString("\r\n")
-		buf.Write(b)
-		msg, err = mail.ReadMessage(&buf)
-		if err != nil {
-			smtpErr := newSMTPError(s.ctx, 550, smtp.EnhancedCode{5, 6, 0}, "invalid message format")
-			return smtpErr
-		}
+		smtpErr := newSMTPError(s.ctx, 550, smtp.EnhancedCode{5, 6, 0}, "invalid message format")
+		return smtpErr
 	}
 
-	// Build a set of all recipients found in To, Cc, and Bcc headers.
-	recipientSet := make(map[string]struct{})
-	for _, header := range []string{"To", "Cc", "Bcc"} {
-		addrs, err := msg.Header.AddressList(header)
-		if err == nil {
-			for _, addr := range addrs {
-				recipientSet[addr.Address] = struct{}{}
-			}
-		}
-	}
-	// Find recipients given to RCPT TO but missing from headers.
-	missingRecipients := []string{}
-	for _, rcpt := range s.recipients {
-		if _, found := recipientSet[rcpt.Address]; !found {
-			missingRecipients = append(missingRecipients, rcpt.String())
-		}
-	}
-	if len(missingRecipients) > 0 {
-		oldBcc := msg.Header.Get("Bcc")
-		// Join missing recipients as a comma-separated string.
-		missingStr := strings.Join(missingRecipients, ", ")
-		if oldBcc != "" {
-			// Append missing recipients to the existing Bcc header.
-			msg.Header["Bcc"] = []string{oldBcc + ", " + missingStr}
-		} else {
-			// Set Bcc header if it was missing.
-			msg.Header["Bcc"] = []string{missingStr}
-		}
-	}
-
-	// Ensure the sender (MAIL FROM) is present in the From header.
-	if s.sender != nil {
-		fromAddrs, err := msg.Header.AddressList("From")
-		found := false
-		if err == nil {
-			for _, addr := range fromAddrs {
-				if addr.Address == s.sender.Address {
-					found = true
-					break
-				}
-			}
-		}
-		if !found {
-			// Patch From header if sender is missing.
-			msg.Header["From"] = []string{s.sender.String()}
-		}
-	}
-
-	err = s.handler.message(s.ctx, msg)
+	err = s.handler.handleMessage(s.ctx, msg)
 	if err != nil {
 		smtpErr := newSMTPError(s.ctx, 554, smtp.EnhancedCode{5, 3, 0}, err.Error())
 		return smtpErr
@@ -198,13 +132,101 @@ func (s *Session) Data(r io.Reader) error {
 	return nil
 }
 
-func (s *Session) Reset() {
+func (s *smtpSession) Reset() {
 	s.sender = nil
 	s.recipients = nil
 }
 
-func (s *Session) Logout() error {
+func (s *smtpSession) Logout() error {
 	return nil
+}
+
+func parseMessage(raw []byte, sender *mail.Address, recipients []mail.Address) (*mail.Message, error) {
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		msg, err = plainTextMessage(raw, sender, recipients)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	normalizeEnvelopeHeaders(msg, sender, recipients)
+	return msg, nil
+}
+
+func plainTextMessage(raw []byte, sender *mail.Address, recipients []mail.Address) (*mail.Message, error) {
+	toList := make([]string, len(recipients))
+	for i, rcpt := range recipients {
+		toList[i] = rcpt.String()
+	}
+
+	var buf bytes.Buffer
+	if sender != nil {
+		buf.WriteString("From: " + sender.String() + "\r\n")
+	}
+	buf.WriteString("To: " + strings.Join(toList, ", ") + "\r\n")
+	buf.WriteString("Subject: (no subject)\r\n")
+	buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+	buf.WriteString("\r\n")
+	buf.Write(raw)
+	return mail.ReadMessage(&buf)
+}
+
+func normalizeEnvelopeHeaders(msg *mail.Message, sender *mail.Address, recipients []mail.Address) {
+	addMissingRecipientsToBcc(msg, recipients)
+
+	if sender != nil && !headerContainsAddress(msg.Header, "From", sender.Address) {
+		msg.Header["From"] = []string{sender.String()}
+	}
+}
+
+func addMissingRecipientsToBcc(msg *mail.Message, recipients []mail.Address) {
+	recipientSet := recipientHeaderSet(msg.Header)
+
+	missingRecipients := make([]string, 0)
+	for _, rcpt := range recipients {
+		if _, found := recipientSet[rcpt.Address]; !found {
+			missingRecipients = append(missingRecipients, rcpt.String())
+		}
+	}
+	if len(missingRecipients) == 0 {
+		return
+	}
+
+	oldBcc := msg.Header.Get("Bcc")
+	missingStr := strings.Join(missingRecipients, ", ")
+	if oldBcc != "" {
+		msg.Header["Bcc"] = []string{oldBcc + ", " + missingStr}
+		return
+	}
+	msg.Header["Bcc"] = []string{missingStr}
+}
+
+func recipientHeaderSet(header mail.Header) map[string]struct{} {
+	recipients := make(map[string]struct{})
+	for _, field := range []string{"To", "Cc", "Bcc"} {
+		addrs, err := header.AddressList(field)
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			recipients[addr.Address] = struct{}{}
+		}
+	}
+	return recipients
+}
+
+func headerContainsAddress(header mail.Header, field, address string) bool {
+	addrs, err := header.AddressList(field)
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		if addr.Address == address {
+			return true
+		}
+	}
+	return false
 }
 
 // newSMTPError creates a new smtp.SMTPError with the given code, enhanced code, and message, and reports it to Sentry.
@@ -214,6 +236,6 @@ func newSMTPError(ctx context.Context, code int, enhanced smtp.EnhancedCode, mes
 		EnhancedCode: enhanced,
 		Message:      message,
 	}
-	ReportError(ctx, err)
+	reportError(ctx, err)
 	return err
 }

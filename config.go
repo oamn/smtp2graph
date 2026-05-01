@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Config holds application configuration loaded from environment variables.
+// appConfig holds application configuration loaded from environment variables.
 //
 // Environment variables:
 //
@@ -27,7 +27,7 @@ import (
 //	SMTP_READ_TIMEOUT       - Read timeout for SMTP connections (default: 10s, e.g. "5s", "1m")
 //	SENTRY_DSN              - Sentry DSN for error reporting (optional)
 
-type Config struct {
+type appConfig struct {
 	SMTPAddr          string        // Address the SMTP server listens on
 	SMTPDomain        string        // Domain name for the SMTP server
 	MaxMessageBytes   int64         // Maximum allowed message size in bytes
@@ -42,14 +42,14 @@ type Config struct {
 	SentryDSN         string        // Sentry DSN for error reporting (optional)
 }
 
-// LoadConfig loads configuration from environment variables, applying defaults for SMTP settings.
+// loadConfig loads configuration from environment variables, applying defaults for SMTP settings.
 // Returns an error if required variables are missing or optional values are invalid.
-func LoadConfig() (*Config, error) {
-	return LoadConfigFrom(os.Getenv)
+func loadConfig() (*appConfig, error) {
+	return loadConfigFrom(os.Getenv)
 }
 
-// LoadConfigFrom loads configuration using lookup and is intended for tests.
-func LoadConfigFrom(lookup func(string) string) (*Config, error) {
+// loadConfigFrom loads configuration using lookup and is intended for tests.
+func loadConfigFrom(lookup func(string) string) (*appConfig, error) {
 	maxMessageBytes, err := getenvInt64(lookup, "SMTP_MAX_MESSAGE_BYTES", 10*1024*1024)
 	if err != nil {
 		return nil, err
@@ -67,7 +67,7 @@ func LoadConfigFrom(lookup func(string) string) (*Config, error) {
 		return nil, err
 	}
 
-	cfg := &Config{
+	cfg := &appConfig{
 		SMTPAddr:          getenv(lookup, "SMTP_SERVER_ADDR", ":1025"),
 		SMTPDomain:        getenv(lookup, "SMTP_SERVER_DOMAIN", "localhost"),
 		MaxMessageBytes:   maxMessageBytes,
