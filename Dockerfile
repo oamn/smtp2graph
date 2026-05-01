@@ -4,7 +4,9 @@ FROM golang:1.26.2 AS builder
 ARG REVISION
 ENV CGO_ENABLED=0
 WORKDIR /app
-COPY . .
+COPY go.mod go.sum ./
+RUN go mod download
+COPY *.go README.md LICENSE ./
 RUN update-ca-certificates --verbose
 RUN go build -trimpath -ldflags="-w -s -X main.revision=$REVISION" -o smtp2graph .
 
@@ -16,5 +18,6 @@ COPY --from=builder /app/smtp2graph /app/smtp2graph
 COPY --from=builder /app/README.md /app/README.md
 COPY --from=builder /app/LICENSE /app/LICENSE
 
+USER 65532:65532
 EXPOSE 1025
 ENTRYPOINT ["/app/smtp2graph"]

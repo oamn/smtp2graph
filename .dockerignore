@@ -1,0 +1,8 @@
+.git
+.github
+.env
+.env.*
+*.out
+*.test
+smtp2graph
+Dockerfile
