@@ -3,67 +3,80 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/mail"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/emersion/go-smtp"
 	"github.com/getsentry/sentry-go"
 )
 
+const shutdownTimeout = 30 * time.Second
+
 // main loads configuration, initializes Sentry, sets up the SMTP backend, and starts the SMTP server.
 func main() {
-	versionFlag := flag.Bool("version", false, "print version and exit")
-	flag.Parse()
+	os.Exit(run(os.Args[1:]))
+}
+
+func run(args []string) (exitCode int) {
+	flags := flag.NewFlagSet(filepath.Base(os.Args[0]), flag.ContinueOnError)
+	versionFlag := flags.Bool("version", false, "print version and exit")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
 	if *versionFlag {
 		appName := filepath.Base(os.Args[0])
 		fmt.Printf("%s (%s) %s %s/%s\n", appName, revision, runtime.Version(), runtime.GOOS, runtime.GOARCH)
-
-		os.Exit(0)
+		return 0
 	}
 
 	cfg, err := loadConfig()
 	if err != nil {
-		exitWithError(err)
+		log.Printf("fatal: %v", err)
+		return 1
 	}
 
-	// Initialize Sentry error reporting if DSN is configured.
-	cleanupSentry := initSentry(cfg)
+	cleanupSentry, err := initSentry(cfg)
+	if err != nil {
+		log.Printf("fatal: initialize Sentry: %v", err)
+		return 1
+	}
+	defer cleanupSentry()
 
-	// Create a root context that is canceled on shutdown
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Create a new Sentry hub for the context
-	// This allows us to use the same hub for all operations in this context
 	hub := sentry.CurrentHub().Clone()
 	ctx = sentry.SetHubOnContext(ctx, hub)
 
 	defer func() {
-		if r := recover(); r != nil {
-			sentry.CurrentHub().Recover(r)
-			log.Printf("panic: %v", r)
-			cleanupSentry(ctx)
-			os.Exit(2)
+		if recovered := recover(); recovered != nil {
+			hub.Recover(recovered)
+			log.Printf("panic: %v", recovered)
+			exitCode = 2
 		}
 	}()
-	defer cancel()
-	defer cleanupSentry(ctx)
 
-	// Set up signal handling for graceful shutdown
 	shutdownCh := make(chan os.Signal, 1)
-	doneCh := make(chan struct{})
 	signal.Notify(shutdownCh, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
+	defer signal.Stop(shutdownCh)
 
-	// Set up the SMTP backend.
 	handler, err := newGraphMailHandler(cfg)
 	if err != nil {
-		exitWithError(err)
+		return handleFatalError(ctx, err)
 	}
 
 	be := &smtpBackend{
@@ -72,37 +85,88 @@ func main() {
 		handler: handler,
 	}
 
-	// Create and configure the SMTP server instance.
+	s := newSMTPServer(be, cfg)
+	listener, err := net.Listen("tcp", s.Addr)
+	if err != nil {
+		return handleFatalError(ctx, err)
+	}
+	defer listener.Close()
+
+	log.Println("Starting server at", s.Addr)
+	if err := serveSMTPServer(s, listener, shutdownCh, cancel, shutdownTimeout); err != nil {
+		return handleFatalError(ctx, err)
+	}
+
+	return 0
+}
+
+func newSMTPServer(be smtp.Backend, cfg *appConfig) *smtp.Server {
 	s := smtp.NewServer(be)
 	s.EnableSMTPUTF8 = true
 	s.EnableBINARYMIME = true
 	s.AllowInsecureAuth = true
-
 	s.Addr = cfg.SMTPAddr
 	s.Domain = cfg.SMTPDomain
 	s.WriteTimeout = cfg.WriteTimeout
 	s.ReadTimeout = cfg.ReadTimeout
 	s.MaxMessageBytes = cfg.MaxMessageBytes
 	s.MaxRecipients = cfg.MaxRecipients
+	return s
+}
 
+func serveSMTPServer(
+	s *smtp.Server,
+	listener net.Listener,
+	shutdownCh <-chan os.Signal,
+	cancel context.CancelFunc,
+	timeout time.Duration,
+) error {
+	ready := &readyListener{
+		Listener: listener,
+		ready:    make(chan struct{}),
+	}
+	serverErrCh := make(chan error, 1)
 	go func() {
-		<-shutdownCh
-		log.Println("Received interrupt signal, shutting down SMTP server...")
-		cancel() // cancel context for all in-flight operations
-		if err := s.Close(); err != nil {
-			log.Printf("Error shutting down SMTP server: %v", err)
-		}
-		close(doneCh)
+		serverErrCh <- s.Serve(ready)
 	}()
 
-	// Main loop: start the server and wait for shutdown signal
-	log.Println("Starting server at", s.Addr)
-	if err := s.ListenAndServe(); err != nil && err != smtp.ErrServerClosed {
-		exitWithError(err)
+	select {
+	case <-ready.ready:
+	case err := <-serverErrCh:
+		return err
 	}
 
-	// Wait for shutdown signal to complete cleanup
-	<-doneCh
+	select {
+	case err := <-serverErrCh:
+		return err
+	case <-shutdownCh:
+		log.Println("Received interrupt signal, shutting down SMTP server...")
+		shutdownCtx, stopShutdown := context.WithTimeout(context.Background(), timeout)
+		shutdownErr := s.Shutdown(shutdownCtx)
+		stopShutdown()
+		cancel()
+
+		// Shutdown closes listeners before waiting for active sessions, so Serve
+		// has exited even when the session drain reaches its deadline.
+		serverErr := <-serverErrCh
+		if errors.Is(serverErr, smtp.ErrServerClosed) {
+			serverErr = nil
+		}
+		return errors.Join(shutdownErr, serverErr)
+	}
+}
+
+type readyListener struct {
+	net.Listener
+	ready chan struct{}
+	once  sync.Once
+}
+
+func (l *readyListener) Accept() (net.Conn, error) {
+	l.once.Do(func() {
+		close(l.ready)
+	})
+	return l.Listener.Accept()
 }
 
 // smtpBackend implements the SMTP server methods required by go-smtp.
@@ -126,12 +190,8 @@ func (bkd *smtpBackend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	}, nil
 }
 
-// exitWithError logs, reports, and exits on fatal errors.
-func exitWithError(err error) {
-	if err == nil {
-		return
-	}
-	reportError(context.Background(), err)
+func handleFatalError(ctx context.Context, err error) int {
+	reportError(ctx, err)
 	log.Printf("fatal: %v", err)
-	os.Exit(1)
+	return 1
 }

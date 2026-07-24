@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -11,20 +10,20 @@ import (
 
 // initSentry initializes Sentry if a DSN is configured.
 // Returns a cleanup function to flush events, or a no-op if Sentry is not enabled.
-func initSentry(cfg *appConfig) func(context.Context) {
+func initSentry(cfg *appConfig) (func(), error) {
 	if cfg.SentryDSN == "" {
-		return func(context.Context) {}
+		return func() {}, nil
 	}
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:     cfg.SentryDSN,
 		Release: "smtp2graph@" + revision,
 	})
 	if err != nil {
-		log.Fatalf("Sentry initialization failed: %v", err)
+		return nil, err
 	}
-	return func(ctx context.Context) {
+	return func() {
 		sentry.Flush(2 * time.Second)
-	}
+	}, nil
 }
 
 // reportError sends an error to Sentry if initialized.
