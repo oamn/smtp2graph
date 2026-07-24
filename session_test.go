@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/mail"
+	"strings"
 	"testing"
+
+	"github.com/emersion/go-smtp"
 )
 
 // mockHandler implements messageHandler for testing.
@@ -209,6 +213,38 @@ func TestSession_Errors(t *testing.T) {
 	})
 }
 
+func TestSessionDataHidesDeliveryError(t *testing.T) {
+	session := newTestSessionWithT(t)
+	session.auth = true
+	session.sender = mustAddress(t, "sender@example.com")
+	session.recipients = []mail.Address{*mustAddress(t, "recipient@example.com")}
+	session.handler.(*mockHandler).err = errors.New("sensitive Graph response detail")
+
+	err := session.Data(strings.NewReader("Subject: Test\r\n\r\nHello"))
+	var smtpErr *smtp.SMTPError
+	if !errors.As(err, &smtpErr) {
+		t.Fatalf("Data() error = %v, want SMTP error", err)
+	}
+	if smtpErr.Code != 451 || smtpErr.Message != "message delivery failed" {
+		t.Fatalf("Data() error = %#v, want temporary generic delivery error", smtpErr)
+	}
+	if strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "Graph") {
+		t.Fatalf("Data() exposed handler error: %v", err)
+	}
+}
+
+func TestSessionDataPreservesSMTPReadError(t *testing.T) {
+	session := newTestSessionWithT(t)
+	session.auth = true
+	session.sender = mustAddress(t, "sender@example.com")
+	session.recipients = []mail.Address{*mustAddress(t, "recipient@example.com")}
+
+	err := session.Data(errorReader{err: smtp.ErrDataTooLarge})
+	if !errors.Is(err, smtp.ErrDataTooLarge) {
+		t.Fatalf("Data() error = %v, want ErrDataTooLarge", err)
+	}
+}
+
 func TestParseMessageNormalizesEnvelopeHeaders(t *testing.T) {
 	sender := mustAddress(t, "Sender <sender@example.com>")
 	recipients := []mail.Address{
@@ -295,4 +331,12 @@ func addressList(t *testing.T, msg *mail.Message, field string) []*mail.Address 
 		t.Fatalf("AddressList(%q) error: %v", field, err)
 	}
 	return addrs
+}
+
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read([]byte) (int, error) {
+	return 0, r.err
 }

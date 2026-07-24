@@ -9,21 +9,22 @@ import (
 	"io"
 	"net/http"
 	"net/mail"
-	"sync"
+	"net/url"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	policy "github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	azidentity "github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 )
 
+const graphRequestTimeout = 30 * time.Second
+
 // graphMailHandler implements the messageHandler interface and relays messages to Microsoft Graph API.
 type graphMailHandler struct {
-	config *appConfig
-	cred   *azidentity.ClientSecretCredential
-
-	token      string
-	tokenExp   int64 // Unix seconds
-	tokenMutex sync.Mutex
+	config  *appConfig
+	cred    azcore.TokenCredential
+	client  *http.Client
+	timeout time.Duration
 }
 
 // newGraphMailHandler creates a new graphMailHandler with a single ClientSecretCredential instance.
@@ -39,48 +40,35 @@ func newGraphMailHandler(config *appConfig) (*graphMailHandler, error) {
 	}
 
 	return &graphMailHandler{
-		config: config,
-		cred:   cred,
+		config:  config,
+		cred:    cred,
+		client:  &http.Client{Timeout: graphRequestTimeout},
+		timeout: graphRequestTimeout,
 	}, nil
 }
 
 // handleMessage relays the given MIME message to Microsoft Graph API.
 func (h *graphMailHandler) handleMessage(ctx context.Context, msg *mail.Message) error {
+	ctx, cancel := context.WithTimeout(ctx, h.timeout)
+	defer cancel()
+
 	mimeMessage, err := encodeMailMessage(msg)
 	if err != nil {
 		return fmt.Errorf("encodeMailMessage: %w", err)
 	}
 
-	accessToken, err := h.getCachedToken(ctx)
+	accessToken, err := h.cred.GetToken(ctx, policy.TokenRequestOptions{
+		Scopes: []string{"https://graph.microsoft.com/.default"},
+	})
 	if err != nil {
-		return fmt.Errorf("getCachedToken: %w", err)
+		return fmt.Errorf("GetToken: %w", err)
 	}
 
-	if err := sendRawMimeMail(ctx, accessToken, h.config.SenderEmail, mimeMessage); err != nil {
+	if err := sendRawMimeMail(ctx, h.client, accessToken.Token, h.config.SenderEmail, mimeMessage); err != nil {
 		return fmt.Errorf("sendRawMimeMail: %w", err)
 	}
 
 	return nil
-}
-
-// getCachedToken returns a valid access token, refreshing it if needed.
-func (h *graphMailHandler) getCachedToken(ctx context.Context) (string, error) {
-	h.tokenMutex.Lock()
-	defer h.tokenMutex.Unlock()
-
-	now := time.Now().Unix()
-	// Refresh if token is missing or expires in <60s
-	if h.token == "" || now > h.tokenExp-60 {
-		token, err := h.cred.GetToken(ctx, policy.TokenRequestOptions{
-			Scopes: []string{"https://graph.microsoft.com/.default"},
-		})
-		if err != nil {
-			return "", fmt.Errorf("GetToken: %w", err)
-		}
-		h.token = token.Token
-		h.tokenExp = token.ExpiresOn.Unix()
-	}
-	return h.token, nil
 }
 
 // encodeMailMessage encodes a mail.Message into raw []byte in RFC822 format.
@@ -113,25 +101,25 @@ func encodeMailMessage(msg *mail.Message) ([]byte, error) {
 // userID: the user ID or email address to send as
 // mimeMessage: the full RFC 5322 message (headers + body)
 // The official Go SDK does not support sending raw MIME messages, so we use a direct HTTP request.
-func sendRawMimeMail(ctx context.Context, accessToken string, userID string, mimeMessage []byte) error {
-	url := fmt.Sprintf("https://graph.microsoft.com/v1.0/users/%s/sendMail", userID)
+func sendRawMimeMail(ctx context.Context, client *http.Client, accessToken string, userID string, mimeMessage []byte) error {
+	endpoint := fmt.Sprintf("https://graph.microsoft.com/v1.0/users/%s/sendMail", url.PathEscape(userID))
 	encoded := base64.StdEncoding.EncodeToString(mimeMessage)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBufferString(encoded))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBufferString(encoded))
 	if err != nil {
 		return fmt.Errorf("NewRequestWithContext: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "text/plain")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("http.Do: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("sendMail failed: %s\n%s", resp.Status, string(b))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+		return fmt.Errorf("sendMail failed: %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	return nil
 }

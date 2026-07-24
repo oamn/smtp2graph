@@ -50,23 +50,23 @@ func (s *smtpSession) Auth(mech string) (sasl.Server, error) {
 
 func (s *smtpSession) Mail(from string, opts *smtp.MailOptions) error {
 	if !s.auth {
-		err := newSMTPError(s.ctx, 530, smtp.EnhancedCode{5, 7, 0}, "authentication required")
+		err := newSMTPError(530, smtp.EnhancedCode{5, 7, 0}, "authentication required")
 		return err
 	}
 
 	// Only allow one sender per SMTP transaction; MAIL FROM must be first.
 	if s.sender != nil {
-		err := newSMTPError(s.ctx, 503, smtp.EnhancedCode{5, 5, 1}, "sender already specified")
+		err := newSMTPError(503, smtp.EnhancedCode{5, 5, 1}, "sender already specified")
 		return err
 	}
 	if len(s.recipients) > 0 {
-		err := newSMTPError(s.ctx, 503, smtp.EnhancedCode{5, 5, 1}, "bad sequence of commands: MAIL FROM after RCPT TO")
+		err := newSMTPError(503, smtp.EnhancedCode{5, 5, 1}, "bad sequence of commands: MAIL FROM after RCPT TO")
 		return err
 	}
 
 	addr, err := mail.ParseAddress(from)
 	if err != nil {
-		smtpErr := newSMTPError(s.ctx, 550, smtp.EnhancedCode{5, 1, 7}, "invalid sender address")
+		smtpErr := newSMTPError(550, smtp.EnhancedCode{5, 1, 7}, "invalid sender address")
 		return smtpErr
 	}
 	s.sender = addr
@@ -76,19 +76,19 @@ func (s *smtpSession) Mail(from string, opts *smtp.MailOptions) error {
 
 func (s *smtpSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 	if !s.auth {
-		err := newSMTPError(s.ctx, 530, smtp.EnhancedCode{5, 7, 0}, "authentication required")
+		err := newSMTPError(530, smtp.EnhancedCode{5, 7, 0}, "authentication required")
 		return err
 	}
 
 	// RCPT TO is not allowed before MAIL FROM.
 	if s.sender == nil {
-		err := newSMTPError(s.ctx, 503, smtp.EnhancedCode{5, 5, 1}, "bad sequence of commands: RCPT TO before MAIL FROM")
+		err := newSMTPError(503, smtp.EnhancedCode{5, 5, 1}, "bad sequence of commands: RCPT TO before MAIL FROM")
 		return err
 	}
 	// Validate recipient address before accepting.
 	addr, err := mail.ParseAddress(to)
 	if err != nil {
-		smtpErr := newSMTPError(s.ctx, 550, smtp.EnhancedCode{5, 1, 3}, "invalid recipient address")
+		smtpErr := newSMTPError(550, smtp.EnhancedCode{5, 1, 3}, "invalid recipient address")
 		return smtpErr
 	}
 
@@ -99,34 +99,40 @@ func (s *smtpSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 
 func (s *smtpSession) Data(r io.Reader) error {
 	if !s.auth {
-		err := newSMTPError(s.ctx, 530, smtp.EnhancedCode{5, 7, 0}, "authentication required")
+		err := newSMTPError(530, smtp.EnhancedCode{5, 7, 0}, "authentication required")
 		return err
 	}
 	if s.sender == nil {
-		err := newSMTPError(s.ctx, 503, smtp.EnhancedCode{5, 5, 1}, "sender not specified")
+		err := newSMTPError(503, smtp.EnhancedCode{5, 5, 1}, "sender not specified")
 		return err
 	}
 	if len(s.recipients) == 0 {
-		err := newSMTPError(s.ctx, 503, smtp.EnhancedCode{5, 5, 1}, "no recipients specified")
+		err := newSMTPError(503, smtp.EnhancedCode{5, 5, 1}, "no recipients specified")
 		return err
 	}
 
 	b, err := io.ReadAll(r)
 	if err != nil {
+		var smtpErr *smtp.SMTPError
+		if errors.As(err, &smtpErr) {
+			return smtpErr
+		}
 		reportError(s.ctx, err)
-		return err
+		return newSMTPError(451, smtp.EnhancedCode{4, 3, 0}, "unable to read message data")
 	}
 
 	msg, err := parseMessage(b, s.sender, s.recipients)
 	if err != nil {
-		smtpErr := newSMTPError(s.ctx, 550, smtp.EnhancedCode{5, 6, 0}, "invalid message format")
+		smtpErr := newSMTPError(550, smtp.EnhancedCode{5, 6, 0}, "invalid message format")
 		return smtpErr
 	}
 
 	err = s.handler.handleMessage(s.ctx, msg)
 	if err != nil {
-		smtpErr := newSMTPError(s.ctx, 554, smtp.EnhancedCode{5, 3, 0}, err.Error())
-		return smtpErr
+		if !errors.Is(err, context.Canceled) {
+			reportError(s.ctx, err)
+		}
+		return newSMTPError(451, smtp.EnhancedCode{4, 3, 0}, "message delivery failed")
 	}
 
 	return nil
@@ -229,13 +235,11 @@ func headerContainsAddress(header mail.Header, field, address string) bool {
 	return false
 }
 
-// newSMTPError creates a new smtp.SMTPError with the given code, enhanced code, and message, and reports it to Sentry.
-func newSMTPError(ctx context.Context, code int, enhanced smtp.EnhancedCode, message string) *smtp.SMTPError {
-	err := &smtp.SMTPError{
+// newSMTPError creates a new smtp.SMTPError with the given code, enhanced code, and message.
+func newSMTPError(code int, enhanced smtp.EnhancedCode, message string) *smtp.SMTPError {
+	return &smtp.SMTPError{
 		Code:         code,
 		EnhancedCode: enhanced,
 		Message:      message,
 	}
-	reportError(ctx, err)
-	return err
 }
