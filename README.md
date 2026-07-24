@@ -57,7 +57,7 @@ To allow smtp2graph to relay emails via Microsoft 365, you must register an appl
    - `SENDER_PASSWORD` (Password for the sender email, required)
    - `SMTP_SERVER_ADDR` (SMTP listen address, default: `:1025`)
    - `SMTP_SERVER_DOMAIN` (SMTP server domain, default: `localhost`)
-   - `SMTP_MAX_MESSAGE_BYTES` (Maximum allowed message size in bytes, default: `10485760`)
+   - `SMTP_MAX_MESSAGE_BYTES` (Maximum allowed message size in bytes, default and maximum: `2900000`; keeps the base64-encoded MIME request within Microsoft Graph's 4 MB write limit)
    - `SMTP_MAX_RECIPIENTS` (Maximum allowed recipients per message, default: `50`)
    - `SMTP_WRITE_TIMEOUT` (Write timeout for SMTP connections, default: `10s`)
    - `SMTP_READ_TIMEOUT` (Read timeout for SMTP connections, default: `10s`)

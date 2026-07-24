@@ -24,8 +24,8 @@ func TestLoadConfigFromDefaults(t *testing.T) {
 	if cfg.SMTPDomain != "localhost" {
 		t.Errorf("SMTPDomain = %q, want localhost", cfg.SMTPDomain)
 	}
-	if cfg.MaxMessageBytes != 10*1024*1024 {
-		t.Errorf("MaxMessageBytes = %d, want %d", cfg.MaxMessageBytes, 10*1024*1024)
+	if cfg.MaxMessageBytes != maxGraphCompatibleMessageBytes {
+		t.Errorf("MaxMessageBytes = %d, want %d", cfg.MaxMessageBytes, maxGraphCompatibleMessageBytes)
 	}
 	if cfg.MaxRecipients != 50 {
 		t.Errorf("MaxRecipients = %d, want 50", cfg.MaxRecipients)
@@ -113,9 +113,33 @@ func TestLoadConfigFromInvalidOptionalValues(t *testing.T) {
 			wantErr: "SMTP_MAX_MESSAGE_BYTES must be a positive integer",
 		},
 		{
+			name:    "negative max message bytes",
+			key:     "SMTP_MAX_MESSAGE_BYTES",
+			value:   "-1",
+			wantErr: "SMTP_MAX_MESSAGE_BYTES must be a positive integer",
+		},
+		{
+			name:    "overflowing max message bytes",
+			key:     "SMTP_MAX_MESSAGE_BYTES",
+			value:   "9223372036854775808",
+			wantErr: "SMTP_MAX_MESSAGE_BYTES must be a positive integer",
+		},
+		{
+			name:    "Graph-incompatible max message bytes",
+			key:     "SMTP_MAX_MESSAGE_BYTES",
+			value:   "2900001",
+			wantErr: "SMTP_MAX_MESSAGE_BYTES must not exceed 2900000",
+		},
+		{
 			name:    "zero max recipients",
 			key:     "SMTP_MAX_RECIPIENTS",
 			value:   "0",
+			wantErr: "SMTP_MAX_RECIPIENTS must be a positive integer",
+		},
+		{
+			name:    "overflowing max recipients",
+			key:     "SMTP_MAX_RECIPIENTS",
+			value:   "18446744073709551615",
 			wantErr: "SMTP_MAX_RECIPIENTS must be a positive integer",
 		},
 		{
@@ -145,6 +169,41 @@ func TestLoadConfigFromInvalidOptionalValues(t *testing.T) {
 				t.Fatalf("loadConfigFrom() error = %q, want %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestLoadConfigFromInvalidSenderEmail(t *testing.T) {
+	tests := []string{
+		"not-an-email",
+		"Sender <sender@example.com>",
+	}
+
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			values := requiredConfig()
+			values["SENDER_EMAIL"] = value
+
+			_, err := loadConfigFrom(configLookup(values))
+			if err == nil {
+				t.Fatal("loadConfigFrom() error = nil, want invalid sender error")
+			}
+			if !strings.Contains(err.Error(), "SENDER_EMAIL must be a valid email address without a display name") {
+				t.Fatalf("loadConfigFrom() error = %q, want invalid sender error", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigFromNormalizesSenderEmail(t *testing.T) {
+	values := requiredConfig()
+	values["SENDER_EMAIL"] = `"sender"@example.com`
+
+	cfg, err := loadConfigFrom(configLookup(values))
+	if err != nil {
+		t.Fatalf("loadConfigFrom() error: %v", err)
+	}
+	if cfg.SenderEmail != "sender@example.com" {
+		t.Fatalf("SenderEmail = %q, want sender@example.com", cfg.SenderEmail)
 	}
 }
 

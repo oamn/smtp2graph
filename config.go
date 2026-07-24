@@ -3,6 +3,7 @@ package main
 
 import (
 	"fmt"
+	"net/mail"
 	"os"
 	"sort"
 	"strconv"
@@ -21,7 +22,7 @@ import (
 //	SENDER_PASSWORD         - Password for the sender email (required)
 //	SMTP_SERVER_ADDR        - Address to listen on (default: :1025)
 //	SMTP_SERVER_DOMAIN      - SMTP server domain (default: localhost)
-//	SMTP_MAX_MESSAGE_BYTES  - Maximum allowed message size in bytes (default: 10485760)
+//	SMTP_MAX_MESSAGE_BYTES  - Maximum allowed message size in bytes (default: 2900000)
 //	SMTP_MAX_RECIPIENTS     - Maximum allowed recipients per message (default: 50)
 //	SMTP_WRITE_TIMEOUT      - Write timeout for SMTP connections (default: 10s, e.g. "5s", "1m")
 //	SMTP_READ_TIMEOUT       - Read timeout for SMTP connections (default: 10s, e.g. "5s", "1m")
@@ -42,6 +43,10 @@ type appConfig struct {
 	SentryDSN         string        // Sentry DSN for error reporting (optional)
 }
 
+// maxGraphCompatibleMessageBytes leaves room for base64 expansion and envelope
+// headers while keeping the Graph write request below its 4 MB limit.
+const maxGraphCompatibleMessageBytes int64 = 2_900_000
+
 // loadConfig loads configuration from environment variables, applying defaults for SMTP settings.
 // Returns an error if required variables are missing or optional values are invalid.
 func loadConfig() (*appConfig, error) {
@@ -50,9 +55,12 @@ func loadConfig() (*appConfig, error) {
 
 // loadConfigFrom loads configuration using lookup and is intended for tests.
 func loadConfigFrom(lookup func(string) string) (*appConfig, error) {
-	maxMessageBytes, err := getenvInt64(lookup, "SMTP_MAX_MESSAGE_BYTES", 10*1024*1024)
+	maxMessageBytes, err := getenvInt64(lookup, "SMTP_MAX_MESSAGE_BYTES", maxGraphCompatibleMessageBytes)
 	if err != nil {
 		return nil, err
+	}
+	if maxMessageBytes > maxGraphCompatibleMessageBytes {
+		return nil, fmt.Errorf("SMTP_MAX_MESSAGE_BYTES must not exceed %d", maxGraphCompatibleMessageBytes)
 	}
 	maxRecipients, err := getenvInt(lookup, "SMTP_MAX_RECIPIENTS", 50)
 	if err != nil {
@@ -100,6 +108,11 @@ func loadConfigFrom(lookup func(string) string) (*appConfig, error) {
 		sort.Strings(missing)
 		return nil, fmt.Errorf("missing required environment variable(s): %s", strings.Join(missing, ", "))
 	}
+	sender, err := mail.ParseAddress(cfg.SenderEmail)
+	if err != nil || sender.Name != "" {
+		return nil, fmt.Errorf("SENDER_EMAIL must be a valid email address without a display name")
+	}
+	cfg.SenderEmail = sender.Address
 	return cfg, nil
 }
 
@@ -117,11 +130,11 @@ func getenvInt(lookup func(string) string, key string, def int) (int, error) {
 	if val == "" {
 		return def, nil
 	}
-	u, err := strconv.ParseUint(val, 10, 0)
-	if err != nil || u == 0 {
+	i, err := strconv.ParseInt(val, 10, strconv.IntSize)
+	if err != nil || i <= 0 {
 		return 0, fmt.Errorf("%s must be a positive integer", key)
 	}
-	return int(u), nil
+	return int(i), nil
 }
 
 // getenvInt64 returns the int64 value of the environment variable or the provided default if unset.
@@ -130,11 +143,11 @@ func getenvInt64(lookup func(string) string, key string, def int64) (int64, erro
 	if val == "" {
 		return def, nil
 	}
-	u, err := strconv.ParseUint(val, 10, 64)
-	if err != nil || u == 0 {
+	i, err := strconv.ParseInt(val, 10, 64)
+	if err != nil || i <= 0 {
 		return 0, fmt.Errorf("%s must be a positive integer", key)
 	}
-	return int64(u), nil
+	return i, nil
 }
 
 // getenvDuration returns the time.Duration value of the environment variable or the provided default if unset.
